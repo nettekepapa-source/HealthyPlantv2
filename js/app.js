@@ -1,10 +1,10 @@
 const CFG={
-  API:'/api/identify',
-  // Modelo local (Transformers.js, ONNX). Cámbialo aquí si usas otro modelo de clasificación de plantas.
-  MODEL:'linkanjarad/mobilenet_v2_1.0_224-plant-disease-identification',
+  // Modelo local (Transformers.js): CLIP ViT-B/32 cuantizado, de Hugging Face (Xenova/clip-vit-base-patch32).
+  MODEL:'Xenova/clip-vit-base-patch32',
   LIB:'https://cdn.jsdelivr.net/npm/@huggingface/transformers@3.0.2',
   LOW:0.6, MAX:1024
 };
+import {PLANTS,CARE,HEALTH} from './plants.js';
 const $=s=>document.querySelector(s),show=(id,on=true)=>$(id).hidden=!on;
 const esc=t=>String(t??'').replace(/[&<>"']/g,c=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]));
 const ico=(n,x='')=>`<svg viewBox="0 0 24 24" fill="currentColor" ${x}><use href="#${n}"/></svg>`;
@@ -22,40 +22,34 @@ function msg(t,d){show('#busy',false);show('#start',false);show('#res',false);co
   m.innerHTML=`<svg class="big" viewBox="0 0 100 100"><use href="#monstera"/></svg><h3>${esc(t)}</h3><p>${esc(d)}</p><button class="btn" id="again">Intentar de nuevo</button>`;$('#again').onclick=reset}
 function reset(){show('#msg',false);show('#res',false);show('#busy',false);show('#start')}
 
-async function online(dataUrl){
-  const r=await fetch(CFG.API,{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({image:dataUrl.split(',')[1],mediaType:'image/jpeg'})});
-  if(r.status===429)throw Object.assign(new Error('limit'),{limit:true});
-  if(!r.ok)throw new Error('http '+r.status);
-  return r.json();
-}
 let clf;
-async function local(dataUrl){
-  $('#busyTxt').textContent='Preparando el modelo local (la primera vez tarda un poco)…';
-  if(!clf){const {pipeline}=await import(CFG.LIB);clf=await pipeline('image-classification',CFG.MODEL)}
-  const [t]=await clf(dataUrl,{top_k:3});
-  const [crop,dis='']=t.label.split('___').map(s=>s.replace(/_/g,' ').replace(/\s+/g,' ').trim());
-  const sana=/healthy/i.test(dis||t.label);
-  return {es_planta:true,nombre_comun:crop,nombre_cientifico:'',confianza:t.score,estado:sana?'sana':'enferma',
-    problema:sana?'':dis,cuidados:null,toxica:null,tratamiento:'',_local:true};
+const OTHER=['a photo of a person','a photo of an animal','a photo of a room interior','a photo of food','a screenshot or a document','a photo of a building, a street or a car'];
+const PLANTLBL=['a photo of a plant with green leaves','a photo of a flower','a photo of a tree'];
+async function analyze(img){
+  $('#busyTxt').textContent='Preparando el modelo (la primera vez se descarga, ~90 MB)…';
+  if(!clf){const {pipeline}=await import(CFG.LIB);clf=await pipeline('zero-shot-image-classification',CFG.MODEL)}
+  $('#busyTxt').textContent='Observando tu planta…';
+  const T={hypothesis_template:'{}'};
+  const g=await clf(img,PLANTLBL.concat(OTHER),T);
+  const pp=g.filter(x=>PLANTLBL.includes(x.label)).reduce((s,x)=>s+x.score,0);
+  if(pp<0.5)return {es_planta:false};
+  const sp=await clf(img,PLANTS.map(p=>'a photo of a '+p.en+' plant'),T);
+  const p=PLANTS.find(x=>'a photo of a '+x.en+' plant'===sp[0].label);
+  const hl=await clf(img,HEALTH.map(h=>h[0]),T),h=HEALTH.find(x=>x[0]===hl[0].label);
+  return {es_planta:true,nombre_comun:p.es,nombre_cientifico:p.sci,confianza:sp[0].score,estado:h[1],problema:h[2],tratamiento:h[3],cuidados:CARE[p.tipo],
+    toxica:p.tox?{mascotas:'sí',ninos:'sí',detalle:'Puede causar irritación o malestar si se mastica o ingiere. Mantenla fuera del alcance y consulta a un veterinario o médico si hay ingestión.'}:{mascotas:'no',ninos:'no',detalle:'Se considera de baja toxicidad, aunque ingerir mucha cantidad puede causar malestar.'}};
 }
 
 async function run(file){
   show('#start',false);show('#msg',false);show('#res',false);show('#busy');$('#busyTxt').textContent='Observando tu planta…';
-  let thumb,img;
+  let thumb,img,data;
   try{img=await shrink(await readFile(file),CFG.MAX);thumb=await shrink(img,160)}catch{return msg('No pudimos leer la foto','Prueba con otra imagen (JPG o PNG).')}
-  let data,mode='online',note='';
-  try{
-    if(!navigator.onLine)throw new Error('offline');
-    data=await online(img);
-  }catch(e){
-    if(e.limit)return msg('Hoy hemos llegado al límite','Se alcanzó el límite de uso del análisis en línea. Inténtalo más tarde.');
-    try{data=await local(img);mode='local';note=navigator.onLine?'El análisis en línea falló; usamos el modo local.':'Sin conexión: usamos el modo local.'}
-    catch{return msg('Sin conexión','Necesitamos internet al menos una vez para descargar el modelo local. Conéctate e inténtalo de nuevo.')}
-  }
-  const p=$('#mode');p.hidden=false;p.textContent=mode==='online'?'Modo en línea · Claude':'Modo local · sin internet';
-  if(!data.es_planta)return msg('No vemos una planta aquí',data.nota||'Acércate más a las hojas y con buena luz.');
-  if(data.confianza<0.25)return msg('La foto no está clara','Parece borrosa o muy lejana. Intenta con más luz y enfoque.');
-  show('#busy',false);render(data,img,note,mode);save(data,thumb);
+  try{data=await analyze(img)}catch(e){console.error(e);
+    return msg(navigator.onLine?'No pudimos cargar el modelo':'Sin conexión',navigator.onLine?'Detalle: '+(e.message||e):'Necesitamos internet al menos una vez para descargar el modelo. Después funciona sin conexión.')}
+  const p=$('#mode');p.hidden=false;p.textContent='Modo local · gratis y sin internet';
+  if(!data.es_planta)return msg('No vemos una planta aquí','Acércate más a las hojas o flores y con buena luz.');
+  if(data.confianza<0.15)return msg('No logré reconocerla','Mi catálogo incluye unas 35 plantas comunes. Prueba con otra foto más cercana y con buena luz.');
+  show('#busy',false);render(data,img,'','local');save(data,thumb);
 }
 
 function render(d,img,note,mode){
@@ -71,7 +65,7 @@ function render(d,img,note,mode){
   h+=c?`<dl>${row('drop','Riego',c.riego)}${row('sun','Luz',c.luz)}${row('pot','Sustrato',c.sustrato)}${row('temp','Temperatura',c.temperatura)}${row('bag','Fertilización',c.fertilizacion)}</dl>`:'<p>Los cuidados completos solo están disponibles en modo en línea.</p>';
   if(d.toxica)h+=`<div class="tox"><b>${ico('paw','width="18" height="18"')} Toxicidad</b><br>Mascotas: ${esc(d.toxica.mascotas)} · Niños: ${esc(d.toxica.ninos)}<br>${esc(d.toxica.detalle)}</div>`;
   if(note)h+=`<div class="hint">${esc(note)}</div>`;
-  if(mode==='local'&&d.confianza<CFG.LOW)h+=`<div class="hint">Confianza baja. Cuando tengas internet, vuelve a intentarlo en línea para un resultado más fiable.</div>`;
+  if(mode==='local'&&d.confianza<CFG.LOW)h+=`<div class="hint">Confianza baja. Prueba con otra foto más cerca de las hojas o flores y con buena luz.</div>`;
   h+=`<p class="sci" style="font-size:.85rem">Resultado orientativo. Verifica con un experto si es tóxica o comestible.</p><button class="btn alt" id="new">Identificar otra planta</button>`;
   $('#res').innerHTML=h;show('#res');$('#new').onclick=reset;
 }

@@ -1,3 +1,2 @@
 # Healthy Plant 🌿
-_La naturaleza habla, nosotros te ayudamos a entenderla._
-Variable de entorno necesaria: ANTHROPIC_API_KEY.
+App estática, sin API key. Sube la carpeta a Netlify Drop, GitHub Pages o cualquier hosting con HTTPS.
